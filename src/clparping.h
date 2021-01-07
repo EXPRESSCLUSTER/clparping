@@ -4,7 +4,7 @@
 #define BUF_SIZE 256
 #define MAX_IFR 64
 #define SELECT_TIMEOUT_SEC 3
-#define SELECT_TIMEOUT_USEC 0
+#define SELECT_TIMEOUT_NSEC 0
 
 #define ERR_NO_PROPER_NIC 1
 

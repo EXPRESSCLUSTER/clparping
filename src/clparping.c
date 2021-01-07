@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <getopt.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
@@ -30,7 +31,8 @@ int main
     struct ifconf ifc;
     struct ether_arp arp_packet;
     struct sockaddr_ll sock_addr;
-    struct timeval timeout;
+    struct timeval timeout_val;
+    struct timespec start_time, cur_time, timeout, remain_time;
     fd_set fds, readfds;
     char buf[BUF_SIZE];
     char logmsg[BUF_SIZE];
@@ -40,7 +42,7 @@ int main
     /* Check arguments */
     int opt;
     int qflag = 0;
-    int wflag = 0, wtime = 0;
+    int wflag = 0, wtime = SELECT_TIMEOUT_SEC;
 
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <DEST_IP> [-q] [-w timeout]\n", argv[0]);
@@ -152,22 +154,16 @@ int main
     memcpy(arp_packet.arp_spa, &src_ip, sizeof(uint32_t));
     memcpy(arp_packet.arp_tpa, &dst_ip, sizeof(uint32_t));
 
-#ifdef DEBUG
+    #ifdef DEBUG
     printf("--------\n");
     printf("SEND\n");
     print_arp(&arp_packet);
     printf("--------\n");
-#endif
+    #endif
 
     /* Preparation for select */
     FD_ZERO(&readfds);
     FD_SET(sd, &readfds);
-    if (wflag == 1) {
-        timeout.tv_sec = wtime;
-    } else {
-        timeout.tv_sec = SELECT_TIMEOUT_SEC;
-    }
-    timeout.tv_usec = SELECT_TIMEOUT_USEC;
 
     /* Send ARP request */
     if (sendto(sd, (char *)&arp_packet, sizeof(arp_packet), 0, (struct sockaddr *)&sock_addr, sizeof(sock_addr)) == -1) {
@@ -175,22 +171,72 @@ int main
         exit(1);
     }
 
+    /* Get timestamp before entering while roop. */
+    /* The timestamp will be used to leave the roop by comparing with current time. */
+    ret = clock_gettime(CLOCK_MONOTONIC_RAW, &start_time);
+    if (ret == -1) {
+        perror("clock_gettime");
+        exit(1);
+    }
+    timeout.tv_sec = start_time.tv_sec + wtime;
+    timeout.tv_nsec = start_time.tv_nsec + SELECT_TIMEOUT_NSEC;
+
     while (1) {
+        /* Check timestamp */
+        /* If it has been wtime since entering roop, exit from the program. */
+        ret = clock_gettime(CLOCK_MONOTONIC_RAW, &cur_time);
+        if (ret == -1) {
+            perror("clock_gettime");
+            exit(1);
+        }
+
+        #ifdef DEBUG
+        printf("start time: %10ld.%09ld\n", start_time.tv_sec, start_time.tv_nsec);
+        printf("  cur time: %10ld.%09ld\n", cur_time.tv_sec, cur_time.tv_nsec);
+        printf("   timeout: %10ld.%09ld\n", timeout.tv_sec, timeout.tv_nsec);
+        #endif
+
+        remain_time.tv_sec = timeout.tv_sec - cur_time.tv_sec;
+        remain_time.tv_nsec = timeout.tv_nsec - cur_time.tv_nsec;
+        if (timeout.tv_nsec - cur_time.tv_nsec < 0) {
+            remain_time.tv_sec--;
+            remain_time.tv_nsec += 1000000000;
+        }
+
+        if (remain_time.tv_sec < 0) {           
+            #ifdef DEBUG
+            printf("TIMEOUT value is %d sec.\n", wtime);
+            #endif
+
+            sprintf(logmsg, "Timeout. (Target IP is %s)", ip);
+            fprintf(stderr, "%s\n", logmsg);
+            if (qflag == 0) {
+                ret = call_clplogcmd(logmsg, EVT_SELECTTIMEOUT, "WARN");
+                if (ret != 0) {
+                    fprintf(stderr, "clplogcmd failed.\n");
+                }
+            }
+            exit(1);
+        }
+
+        #ifdef DEBUG
+        printf("    remain: %10ld.%09ld\n\n", remain_time.tv_sec, remain_time.tv_nsec);
+        #endif
+ 
         /* Wait for socket to become ready */
         memcpy(&fds, &readfds, sizeof(fd_set));
-        ret = select(sd + 1, &fds, NULL, NULL, &timeout);
+        timeout_val.tv_sec = remain_time.tv_sec;
+        timeout_val.tv_usec = remain_time.tv_nsec / 1000;
+        ret = select(sd + 1, &fds, NULL, NULL, &timeout_val);
         if (ret == -1) {
             perror("select");
             exit(1);
         }
         else if (ret == 0) {
-#ifdef DEBUG
-            if (wflag == 1) {
-                printf("TIMEOUT value is %d sec.\n", wtime);
-            } else {
-                printf("TIMEOUT value is %d sec.\n", SELECT_TIMEOUT_SEC);
-            }
-#endif
+            #ifdef DEBUG
+            printf("TIMEOUT value is %d sec.\n", wtime);
+            #endif
+
             sprintf(logmsg, "Timeout. (Target IP is %s)", ip);
             fprintf(stderr, "%s\n", logmsg);
             if (qflag == 0) {
@@ -214,17 +260,17 @@ int main
             /* Receive only packet of which target is my IP */
             memcpy(&arp_packet, buf, sizeof(arp_packet));
             memcpy(&tmp_ip, arp_packet.arp_tpa, sizeof(tmp_ip));
-            if (tmp_ip != src_ip || ntohs(((struct ether_arp*)buf)->ea_hdr.ar_op) != 2) {
+            if (tmp_ip != src_ip || ntohs(((struct ether_arp*)buf)->ea_hdr.ar_op) != 2) {       
                 continue;
             }
 
-#ifdef DEBUG
+            #ifdef DEBUG
             printf("--------\n");
             printf("RECV\n");
             print_arp(&arp_packet);
             printf("arp_packet operation : %d\n", ntohs(((struct ether_arp*)buf)->ea_hdr.ar_op));
             printf("--------\n");
-#endif
+            #endif
         }
 
         break;
@@ -338,7 +384,7 @@ int specify_nic
         src_net = src_ip & net_mask;
         dst_net = dst_ip & net_mask;
 
-#ifdef DEBUG
+        #ifdef DEBUG
         printf("NIC name        : %s\n", ifr_array[i].ifr_name);
         memcpy(ip_print, &src_ip, sizeof(uint32_t));
         printf("src IP          : %3d.%3d.%3d.%3d\n", ip_print[0], ip_print[1], ip_print[2], ip_print[3]);
@@ -348,14 +394,14 @@ int specify_nic
         printf("src network     : %3d.%3d.%3d.%3d\n", ip_print[0], ip_print[1], ip_print[2], ip_print[3]);
         memcpy(ip_print, &dst_net, sizeof(uint32_t));
         printf("dst network     : %3d.%3d.%3d.%3d\n\n", ip_print[0], ip_print[1], ip_print[2], ip_print[3]);
-#endif
+        #endif
 
         /* Specify proper NIC by comparing both network addresses */
         if (src_net == dst_net) {
 
-#ifdef DEBUG
+            #ifdef DEBUG
             printf("** MATCH **\n\n");
-#endif
+            #endif
 
             strncpy(ifname, ifr_array[i].ifr_name, sizeof(ifr_array[i].ifr_name));
             return 0;

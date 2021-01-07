@@ -39,5 +39,5 @@ clparping <DEST_IP> [-q] [-w timeout]
     - Used to suppress warning messages on Cluster WebUI.
     - This option can be omitted.
 - `-w timeout`
-    - Used to specify the timeout value.
+    - Used to specify the time for waiting for ARP reply.
     - This option can be omitted. If you omit this option, the timeout value is set as 3 seconds.
